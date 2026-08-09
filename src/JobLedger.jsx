@@ -118,6 +118,7 @@ export default function JobLedger({ user, onLogout }) {
   const [stageFilter, setStageFilter] = useState("All");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("All"); // "All" | "Manual" | "Synced"
   const [draft, setDraft] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [syncing, setSyncing] = useState(false);
@@ -168,12 +169,14 @@ export default function JobLedger({ user, onLogout }) {
       const callDate = a.nextCall ? a.nextCall.slice(0, 10) : "";
       const matchesFrom = !dateFrom || (callDate && callDate >= dateFrom);
       const matchesTo = !dateTo || (callDate && callDate <= dateTo);
-      return matchesStage && matchesSearch && matchesFrom && matchesTo;
+      const isSynced = a.platform === "Recruiter Outreach";
+      const matchesSource = sourceFilter === "All" || (sourceFilter === "Synced" ? isSynced : !isSynced);
+      return matchesStage && matchesSearch && matchesFrom && matchesTo && matchesSource;
     }).sort((a, b) => {
       const da = a.nextCall || "9999", db = b.nextCall || "9999";
       return da.localeCompare(db);
     });
-  }, [apps, search, stageFilter]);
+  }, [apps, search, stageFilter, dateFrom, dateTo, sourceFilter]);
 
   const stats = useMemo(() => {
     const active = apps.filter(a => a.stage !== "Offer" && a.stage !== "Rejected");
@@ -376,6 +379,7 @@ export default function JobLedger({ user, onLogout }) {
             stageFilter={stageFilter} setStageFilter={setStageFilter}
             dateFrom={dateFrom} setDateFrom={setDateFrom}
             dateTo={dateTo} setDateTo={setDateTo}
+            sourceFilter={sourceFilter} setSourceFilter={setSourceFilter}
             onNew={openNew} onEdit={openEdit} onDelete={(id) => setConfirmDelete(id)}
             onMarkContacted={markContacted}
             onMarkRejected={markRejected}
@@ -495,7 +499,7 @@ function FollowRow({ app, overdue, onOpen, onContact }) {
   );
 }
 
-function AppsView({ filtered, search, setSearch, stageFilter, setStageFilter, dateFrom, setDateFrom, dateTo, setDateTo, onNew, onEdit, onDelete, onMarkContacted, onMarkRejected }) {
+function AppsView({ filtered, search, setSearch, stageFilter, setStageFilter, dateFrom, setDateFrom, dateTo, setDateTo, sourceFilter, setSourceFilter, onNew, onEdit, onDelete, onMarkContacted, onMarkRejected }) {
   return (
     <div className="ll-page">
       <PageHeader eyebrow="Records" title="Applications" subtitle="Every application, in ledger order." action={
@@ -523,6 +527,12 @@ function AppsView({ filtered, search, setSearch, stageFilter, setStageFilter, da
         {(dateFrom || dateTo) && (
           <button className="ll-linklike" onClick={() => { setDateFrom(""); setDateTo(""); }}>Clear</button>
         )}
+        <span className="ll-daterange-sep" style={{ marginLeft: 8 }}>Source:</span>
+        <div className="ll-chips" style={{ margin: 0 }}>
+          <button className={`ll-chip ${sourceFilter === "All" ? "ll-chip-active" : ""}`} onClick={() => setSourceFilter("All")}>All</button>
+          <button className={`ll-chip ${sourceFilter === "Manual" ? "ll-chip-active" : ""}`} onClick={() => setSourceFilter("Manual")}>Manual only</button>
+          <button className={`ll-chip ${sourceFilter === "Synced" ? "ll-chip-active" : ""}`} onClick={() => setSourceFilter("Synced")}>Calendar-synced only</button>
+        </div>
       </div>
 
       <div className="ll-card ll-ledgercard">
