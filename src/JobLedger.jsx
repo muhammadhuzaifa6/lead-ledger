@@ -4,6 +4,7 @@ import {
   DollarSign, AlertCircle, CheckCircle2, ChevronRight, CalendarDays, LayoutGrid,
   BookOpen, Loader2, ArrowUpRight, Briefcase, User, Link as LinkIcon, Ban
 } from "lucide-react";
+import { supabase } from "./supabaseClient";
 
 const STAGES = ["1st Call", "2nd Call", "3rd Call", "Final Call", "Offer", "Rejected"];
 const PLATFORMS = ["LinkedIn", "Company Site", "Referral", "Indeed", "Wellfound", "Recruiter Outreach", "Other"];
@@ -22,6 +23,46 @@ const normalizeStage = (raw) => {
   if (!raw) return "1st Call";
   const match = STAGES.find(s => s.toLowerCase() === String(raw).trim().toLowerCase());
   return match || "1st Call";
+};
+
+// Converts a Supabase row (snake_case) into the app's shape (camelCase)
+const rowToApp = (r) => ({
+  id: r.id,
+  company: r.company,
+  jobTitle: r.job_title || "",
+  recruiterName: r.recruiter_name || "",
+  recruiterEmail: r.recruiter_email || "",
+  recruiterPhone: r.recruiter_phone || "",
+  platform: r.platform || "LinkedIn",
+  stage: normalizeStage(r.stage),
+  salary: r.salary || 0,
+  nextCall: r.next_call || "",
+  rejectedAt: r.rejected_at || null,
+  jobUrl: r.job_url || "",
+  notes: r.notes || "",
+  activity: r.activity || [],
+  createdAt: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
+});
+
+// Converts the app's shape back into a Supabase row for insert/update
+const appToRow = (a, userId) => {
+  const row = {
+    company: a.company,
+    job_title: a.jobTitle || "",
+    recruiter_name: a.recruiterName || "",
+    recruiter_email: a.recruiterEmail || "",
+    recruiter_phone: a.recruiterPhone || "",
+    platform: a.platform || "LinkedIn",
+    stage: a.stage || "1st Call",
+    salary: Number(a.salary) || 0,
+    next_call: a.nextCall || null,
+    rejected_at: a.rejectedAt || null,
+    job_url: a.jobUrl || "",
+    notes: a.notes || "",
+    activity: a.activity || [],
+  };
+  if (userId) row.user_id = userId;
+  return row;
 };
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const fmtMoney = (n) => n ? `$${Number(n).toLocaleString()}` : "—";
@@ -69,7 +110,7 @@ const emptyDraft = () => ({
   platform: "LinkedIn", stage: "1st Call", salary: "", nextCall: "", jobUrl: "", notes: "",
 });
 
-export default function JobLedger() {
+export default function JobLedger({ user, onLogout }) {
   const [apps, setApps] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState("dashboard");
@@ -80,25 +121,37 @@ export default function JobLedger() {
   const [syncing, setSyncing] = useState(false);
   const [syncLog, setSyncLog] = useState([]);
   const [toast, setToast] = useState(null);
+  const [calendarConnected, setCalendarConnected] = useState(null); // null = unknown, true/false once checked
 
   useEffect(() => {
-    const saved = localStorage.getItem("applications");
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      const migrated = parsed.map(a =>
-        STAGES.includes(a.stage) ? a : { ...a, stage: normalizeStage(a.stage) }
-      );
-      setApps(migrated);
-    } else {
-      setApps(seedApps());
-    }
-    setLoaded(true);
-  }, []);
+    if (!user) return;
+    (async () => {
+      const { data, error } = await supabase
+        .from("applications")
+        .select("*")
+        .order("created_at", { ascending: false });
+      if (!error && data) setApps(data.map(rowToApp));
+      setLoaded(true);
+    })();
+  }, [user]);
 
   useEffect(() => {
-    if (!loaded) return;
-    localStorage.setItem("applications", JSON.stringify(apps));
-  }, [apps, loaded]);
+    if (!user) return;
+    (async () => {
+      const { data } = await supabase
+        .from("calendar_connections")
+        .select("connected_at")
+        .maybeSingle();
+      setCalendarConnected(!!data);
+    })();
+  }, [user]);
+
+  const connectCalendar = async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    const accessToken = session?.access_token;
+    if (!accessToken) { showToast("Please log in again.", "warn"); return; }
+    window.location.href = `/api/auth?token=${encodeURIComponent(accessToken)}`;
+  };
 
   const showToast = useCallback((msg, kind = "ok") => {
     setToast({ msg, kind });
@@ -132,48 +185,70 @@ export default function JobLedger() {
   const openEdit = (app) => setDraft({ ...app, salary: String(app.salary ?? "") });
   const closeDraft = () => setDraft(null);
 
-  const saveDraft = () => {
+  const saveDraft = async () => {
     if (!draft.company.trim()) { showToast("An application needs at least a company name.", "warn"); return; }
     if (draft.id) {
-      setApps(prev => prev.map(a => a.id === draft.id ? {
-        ...a, ...draft, salary: Number(draft.salary) || 0,
-        activity: [...(a.activity || []), `Updated — stage: ${draft.stage}`],
-      } : a));
+      const existing = apps.find(a => a.id === draft.id);
+      const updatedApp = {
+        ...existing, ...draft, salary: Number(draft.salary) || 0,
+        activity: [...(existing?.activity || []), `Updated — stage: ${draft.stage}`],
+      };
+      const { error } = await supabase.from("applications").update(appToRow(updatedApp)).eq("id", draft.id);
+      if (error) { showToast("Failed to save — " + error.message, "warn"); return; }
+      setApps(prev => prev.map(a => a.id === draft.id ? updatedApp : a));
       showToast("Application updated.");
     } else {
       const newApp = {
-        ...draft, id: uid(), salary: Number(draft.salary) || 0, createdAt: Date.now(),
+        ...draft, salary: Number(draft.salary) || 0,
         activity: [`Application created manually — source: ${draft.platform}`],
       };
-      setApps(prev => [newApp, ...prev]);
+      const { data, error } = await supabase
+        .from("applications")
+        .insert(appToRow(newApp, user.id))
+        .select()
+        .single();
+      if (error) { showToast("Failed to add — " + error.message, "warn"); return; }
+      setApps(prev => [rowToApp(data), ...prev]);
       showToast("Application added.");
     }
     setDraft(null);
   };
 
-  const deleteApp = (id) => {
+  const deleteApp = async (id) => {
+    const { error } = await supabase.from("applications").delete().eq("id", id);
+    if (error) { showToast("Failed to delete — " + error.message, "warn"); setConfirmDelete(null); return; }
     setApps(prev => prev.filter(a => a.id !== id));
     setConfirmDelete(null);
     showToast("Application removed.", "warn");
   };
 
-  const markContacted = (id) => {
-    setApps(prev => prev.map(a => a.id === id ? {
-      ...a,
+  const markContacted = async (id) => {
+    const existing = apps.find(a => a.id === id);
+    if (!existing) return;
+    const updatedApp = {
+      ...existing,
       nextCall: new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 16),
-      activity: [...(a.activity || []), "Marked as followed up — next check-in pushed 5 days"],
-    } : a));
+      activity: [...(existing.activity || []), "Marked as followed up — next check-in pushed 5 days"],
+    };
+    const { error } = await supabase.from("applications").update(appToRow(updatedApp)).eq("id", id);
+    if (error) { showToast("Failed to update — " + error.message, "warn"); return; }
+    setApps(prev => prev.map(a => a.id === id ? updatedApp : a));
     showToast("Follow-up rescheduled.");
   };
 
-  const markRejected = (id) => {
+  const markRejected = async (id) => {
+    const existing = apps.find(a => a.id === id);
+    if (!existing) return;
     const now = new Date().toISOString();
-    setApps(prev => prev.map(a => a.id === id ? {
-      ...a,
+    const updatedApp = {
+      ...existing,
       stage: "Rejected",
       rejectedAt: now,
-      activity: [...(a.activity || []), `Marked as rejected — ${new Date(now).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}`],
-    } : a));
+      activity: [...(existing.activity || []), `Marked as rejected — ${new Date(now).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}`],
+    };
+    const { error } = await supabase.from("applications").update(appToRow(updatedApp)).eq("id", id);
+    if (error) { showToast("Failed to update — " + error.message, "warn"); return; }
+    setApps(prev => prev.map(a => a.id === id ? updatedApp : a));
     showToast("Marked as rejected.", "warn");
   };
 
@@ -182,7 +257,11 @@ export default function JobLedger() {
     setSyncing(true);
     try {
       const API_BASE = import.meta.env.PROD ? "" : "http://localhost:3001";
-      const response = await fetch(`${API_BASE}/api/calendar-events`);
+      const { data: { session } } = await supabase.auth.getSession();
+      const accessToken = session?.access_token;
+      const response = await fetch(`${API_BASE}/api/calendar-events`, {
+        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+      });
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
         throw new Error(body.error || `Backend returned ${response.status} — is it running on port 3001?`);
@@ -191,40 +270,51 @@ export default function JobLedger() {
       if (!Array.isArray(matches)) matches = [];
 
       let added = 0, updated = 0;
-      setApps(prev => {
-        let next = [...prev];
-        matches.forEach(m => {
-          if (!m.company) return;
-          const existingIdx = next.findIndex(a =>
-            a.company.toLowerCase() === String(m.company).toLowerCase() &&
-            (a.recruiterName || "").toLowerCase() === String(m.recruiterName || "").toLowerCase()
-          );
-          const validStage = STAGES.includes(m.stage) ? m.stage : normalizeStage(m.stage);
-          if (existingIdx >= 0) {
-            next[existingIdx] = {
-              ...next[existingIdx],
-              stage: validStage,
-              nextCall: m.eventDate || next[existingIdx].nextCall,
-              jobTitle: m.jobTitle || next[existingIdx].jobTitle,
-              recruiterEmail: m.recruiterEmail || next[existingIdx].recruiterEmail,
-              jobUrl: m.jobUrl || next[existingIdx].jobUrl,
-              salary: m.salary || next[existingIdx].salary,
-              notes: m.notes || next[existingIdx].notes,
-              activity: [...(next[existingIdx].activity || []), `Calendar sync — ${validStage} on ${m.eventDate || "?"}`],
-            };
+      let current = apps;
+      for (const m of matches) {
+        if (!m.company) continue;
+        const existing = current.find(a =>
+          a.company.toLowerCase() === String(m.company).toLowerCase() &&
+          (a.recruiterName || "").toLowerCase() === String(m.recruiterName || "").toLowerCase()
+        );
+        const validStage = STAGES.includes(m.stage) ? m.stage : normalizeStage(m.stage);
+
+        if (existing) {
+          const updatedApp = {
+            ...existing,
+            stage: validStage,
+            nextCall: m.eventDate || existing.nextCall,
+            jobTitle: m.jobTitle || existing.jobTitle,
+            recruiterEmail: m.recruiterEmail || existing.recruiterEmail,
+            jobUrl: m.jobUrl || existing.jobUrl,
+            salary: m.salary || existing.salary,
+            notes: m.notes || existing.notes,
+            activity: [...(existing.activity || []), `Calendar sync — ${validStage} on ${m.eventDate || "?"}`],
+          };
+          const { error } = await supabase.from("applications").update(appToRow(updatedApp)).eq("id", existing.id);
+          if (!error) {
+            current = current.map(a => a.id === existing.id ? updatedApp : a);
             updated++;
-          } else {
-            next = [{
-              id: uid(), company: m.company, jobTitle: m.jobTitle || "", recruiterName: m.recruiterName || "",
-              recruiterEmail: m.recruiterEmail || "", recruiterPhone: "", platform: "Recruiter Outreach", stage: validStage, salary: m.salary || 0,
-              nextCall: m.eventDate || "", jobUrl: m.jobUrl || "", notes: m.notes || "",
-              createdAt: Date.now(), activity: [`Imported from calendar — ${validStage} on ${m.eventDate || "?"}`],
-            }, ...next];
+          }
+        } else {
+          const newApp = {
+            company: m.company, jobTitle: m.jobTitle || "", recruiterName: m.recruiterName || "",
+            recruiterEmail: m.recruiterEmail || "", recruiterPhone: "", platform: "Recruiter Outreach", stage: validStage, salary: m.salary || 0,
+            nextCall: m.eventDate || "", jobUrl: m.jobUrl || "", notes: m.notes || "",
+            activity: [`Imported from calendar — ${validStage} on ${m.eventDate || "?"}`],
+          };
+          const { data, error } = await supabase
+            .from("applications")
+            .insert(appToRow(newApp, user.id))
+            .select()
+            .single();
+          if (!error && data) {
+            current = [rowToApp(data), ...current];
             added++;
           }
-        });
-        return next;
-      });
+        }
+      }
+      setApps(current);
       const logEntry = { time: new Date().toLocaleTimeString(), added, updated, found: matches.length };
       setSyncLog(prev => [logEntry, ...prev].slice(0, 8));
       showToast(matches.length ? `Synced: ${added} new, ${updated} updated.` : "No interview-style events found in your calendar.");
@@ -261,6 +351,12 @@ export default function JobLedger() {
             <span>Overdue follow-ups</span>
             <strong style={{ color: stats.overdue.length ? "var(--rust)" : "var(--ink)" }}>{stats.overdue.length}</strong>
           </div>
+          {user && (
+            <div className="ll-account">
+              <span className="ll-account-email">{user.email}</span>
+              <button className="ll-account-logout" onClick={onLogout}>Log out</button>
+            </div>
+          )}
         </div>
       </aside>
 
@@ -279,7 +375,7 @@ export default function JobLedger() {
           />
         )}
         {view === "sync" && (
-          <SyncView syncing={syncing} onSync={syncFromCalendar} log={syncLog} />
+          <SyncView syncing={syncing} onSync={syncFromCalendar} log={syncLog} calendarConnected={calendarConnected} onConnect={connectCalendar} />
         )}
       </main>
 
@@ -446,7 +542,7 @@ function AppsView({ filtered, search, setSearch, stageFilter, setStageFilter, on
   );
 }
 
-function SyncView({ syncing, onSync, log }) {
+function SyncView({ syncing, onSync, log, calendarConnected, onConnect }) {
   return (
     <div className="ll-page">
       <PageHeader eyebrow="Automation" title="Calendar Sync" subtitle="Pull new and updated applications straight from your Google Calendar." />
@@ -458,25 +554,31 @@ function SyncView({ syncing, onSync, log }) {
             Title your interview events the way you already do:
           </p>
           <ul className="ll-list">
-            <li><code>Company - Recruiter - Round</code>, e.g. <code>Northline Retail - Priya Kapoor - 2nd Call</code></li>
-            <li>Or anything that clearly reads as a recruiter screen, interview, or hiring call</li>
+            <li><code>Round&lt;&gt;JobTitle&lt;&gt;Company</code>, e.g. <code>1st call&lt;&gt;DevOps Engineer&lt;&gt;Opply</code></li>
+            <li>Or a structured description with Position/Company/Recruiter's name/Recruiter's email/etc.</li>
           </ul>
-          <p className="ll-copy">
-            On sync, it scans events from 3 days ago through the next 30 days, and maps the round in
-            the title to a pipeline stage — "recruiter screen" becomes <strong>Screening</strong>, "onsite" or
-            "panel" becomes <strong>Final Call</strong>, and so on. New matches become new applications;
-            existing ones (matched by company + recruiter) get their stage and next-call date refreshed,
-            with an activity note instead of a duplicate entry.
-          </p>
-          <button className="ll-btn ll-btn-primary" onClick={onSync} disabled={syncing} style={{ marginTop: 14 }}>
+
+          {calendarConnected === false && (
+            <div className="ll-connect-banner">
+              <span>Your Google Calendar isn't connected yet.</span>
+              <button className="ll-btn ll-btn-primary" onClick={onConnect}>Connect my Calendar</button>
+            </div>
+          )}
+
+          <button
+            className="ll-btn ll-btn-primary"
+            onClick={onSync}
+            disabled={syncing || calendarConnected !== true}
+            style={{ marginTop: 14 }}
+          >
             {syncing ? <Loader2 size={15} className="ll-spin" /> : <RefreshCw size={15} />}
             {syncing ? "Syncing…" : "Sync from Google Calendar"}
           </button>
-          <p className="ll-copy" style={{ marginTop: 10, fontSize: 12 }}>
-            When running locally, needs the sync server on port 3001 (connected once via
-            <code style={{ marginLeft: 4 }}>localhost:3001/auth</code>). On the deployed site,
-            this connects automatically via <code style={{ marginLeft: 4 }}>/api/calendar-events</code>.
-          </p>
+          {calendarConnected === true && (
+            <p className="ll-copy" style={{ marginTop: 10, fontSize: 12 }}>
+              Calendar connected. <button className="ll-linklike" onClick={onConnect}>Reconnect</button> if sync ever stops working.
+            </p>
+          )}
         </section>
 
         <section className="ll-card">
@@ -662,6 +764,12 @@ function Style() {
       .ll-sidebar-foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.12); }
       .ll-mini-stat { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #9AA0AC; }
       .ll-mini-stat strong { font-family: 'IBM Plex Mono', monospace; font-size: 15px; color: #E8E9E3; }
+      .ll-account { margin-top: 4px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.12); display: flex; flex-direction: column; gap: 6px; }
+      .ll-account-email { font-size: 11px; color: #9AA0AC; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .ll-account-logout { align-self: flex-start; background: none; border: none; color: #C6CAD2; font-size: 12px; cursor: pointer; font-family: inherit; padding: 0; text-decoration: underline; }
+      .ll-account-logout:hover { color: #fff; }
+      .ll-connect-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--paper); border-radius: 8px; padding: 12px 14px; margin-top: 14px; font-size: 13px; }
+      .ll-linklike { background: none; border: none; color: var(--ink); text-decoration: underline; cursor: pointer; font-family: inherit; font-size: inherit; padding: 0; }
 
       .ll-main { flex: 1; overflow-y: auto; padding: 32px 40px 60px; }
       .ll-page { max-width: 980px; margin: 0 auto; }

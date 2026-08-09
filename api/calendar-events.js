@@ -1,11 +1,27 @@
 import { google } from "googleapis";
+import { createClient } from "@supabase/supabase-js";
 
-function getOAuthClient() {
-  const client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET
-  );
-  client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+async function getUserRefreshToken(jwt) {
+  const supabase = createClient(process.env.VITE_SUPABASE_URL, process.env.VITE_SUPABASE_ANON_KEY, {
+    global: { headers: { Authorization: `Bearer ${jwt}` } },
+  });
+
+  const { data: userData, error: userError } = await supabase.auth.getUser(jwt);
+  if (userError || !userData?.user) return { error: "unauthorized" };
+
+  const { data, error } = await supabase
+    .from("calendar_connections")
+    .select("refresh_token")
+    .eq("user_id", userData.user.id)
+    .maybeSingle();
+
+  if (error || !data) return { error: "not_connected" };
+  return { refreshToken: data.refresh_token };
+}
+
+function getOAuthClient(refreshToken) {
+  const client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET);
+  client.setCredentials({ refresh_token: refreshToken });
   return client;
 }
 
@@ -80,13 +96,21 @@ function parseDescription(description) {
 
 export default async function handler(req, res) {
   try {
-    if (!process.env.GOOGLE_REFRESH_TOKEN) {
-      return res.status(401).json({
-        error: "Not connected yet — visit /api/auth first, then paste the refresh token into your Vercel env vars.",
-      });
+    const authHeader = req.headers.authorization || "";
+    const jwt = authHeader.replace(/^Bearer\s+/i, "");
+    if (!jwt) {
+      return res.status(401).json({ error: "Not logged in." });
     }
 
-    const oauth2Client = getOAuthClient();
+    const { refreshToken, error: tokenError } = await getUserRefreshToken(jwt);
+    if (tokenError === "unauthorized") {
+      return res.status(401).json({ error: "Session invalid — please log in again." });
+    }
+    if (tokenError === "not_connected") {
+      return res.status(401).json({ error: "Calendar not connected yet — click 'Connect my Calendar' first." });
+    }
+
+    const oauth2Client = getOAuthClient(refreshToken);
     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
     const timeMin = new Date(Date.now() - 3 * 86400000).toISOString();
     const timeMax = new Date(Date.now() + 30 * 86400000).toISOString();
