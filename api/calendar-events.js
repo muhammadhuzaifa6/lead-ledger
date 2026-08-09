@@ -40,6 +40,20 @@ function parseEventTitle(title) {
   return { company: title, recruiterName: "", round: title, jobTitle: "" };
 }
 
+function htmlToPlainText(html) {
+  if (!html) return "";
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<a[^>]*href="([^"]+)"[^>]*>.*?<\/a>/gi, "$1")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .trim();
+}
+
 function parseDescription(description) {
   const fields = {};
   if (!description) return fields;
@@ -90,7 +104,8 @@ export default async function handler(req, res) {
       .filter((ev) => ev.summary)
       .map((ev) => {
         const titleParsed = parseEventTitle(ev.summary);
-        const desc = parseDescription(ev.description);
+        const plainDescription = htmlToPlainText(ev.description);
+        const desc = parseDescription(plainDescription);
 
         const company = desc.company || titleParsed.company || "";
         const jobTitle = desc.jobTitle || titleParsed.jobTitle || "";
@@ -119,7 +134,7 @@ export default async function handler(req, res) {
           stage,
           salary,
           eventDate: start ? start.slice(0, 16) : "",
-          notes: noteBits.join(" · ") || ev.description || ev.summary,
+          notes: noteBits.join(" · ") || plainDescription || ev.summary,
         };
       });
 
