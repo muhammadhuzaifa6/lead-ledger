@@ -116,6 +116,8 @@ export default function JobLedger({ user, onLogout }) {
   const [view, setView] = useState("dashboard");
   const [search, setSearch] = useState("");
   const [stageFilter, setStageFilter] = useState("All");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [draft, setDraft] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [syncing, setSyncing] = useState(false);
@@ -163,7 +165,10 @@ export default function JobLedger({ user, onLogout }) {
       const matchesStage = stageFilter === "All" || a.stage === stageFilter;
       const q = search.trim().toLowerCase();
       const matchesSearch = !q || [a.company, a.jobTitle, a.recruiterName, a.notes].join(" ").toLowerCase().includes(q);
-      return matchesStage && matchesSearch;
+      const callDate = a.nextCall ? a.nextCall.slice(0, 10) : "";
+      const matchesFrom = !dateFrom || (callDate && callDate >= dateFrom);
+      const matchesTo = !dateTo || (callDate && callDate <= dateTo);
+      return matchesStage && matchesSearch && matchesFrom && matchesTo;
     }).sort((a, b) => {
       const da = a.nextCall || "9999", db = b.nextCall || "9999";
       return da.localeCompare(db);
@@ -369,6 +374,8 @@ export default function JobLedger({ user, onLogout }) {
             filtered={filtered}
             search={search} setSearch={setSearch}
             stageFilter={stageFilter} setStageFilter={setStageFilter}
+            dateFrom={dateFrom} setDateFrom={setDateFrom}
+            dateTo={dateTo} setDateTo={setDateTo}
             onNew={openNew} onEdit={openEdit} onDelete={(id) => setConfirmDelete(id)}
             onMarkContacted={markContacted}
             onMarkRejected={markRejected}
@@ -488,7 +495,7 @@ function FollowRow({ app, overdue, onOpen, onContact }) {
   );
 }
 
-function AppsView({ filtered, search, setSearch, stageFilter, setStageFilter, onNew, onEdit, onDelete, onMarkContacted, onMarkRejected }) {
+function AppsView({ filtered, search, setSearch, stageFilter, setStageFilter, dateFrom, setDateFrom, dateTo, setDateTo, onNew, onEdit, onDelete, onMarkContacted, onMarkRejected }) {
   return (
     <div className="ll-page">
       <PageHeader eyebrow="Records" title="Applications" subtitle="Every application, in ledger order." action={
@@ -506,6 +513,16 @@ function AppsView({ filtered, search, setSearch, stageFilter, setStageFilter, on
             <button key={s} className={`ll-chip ${stageFilter === s ? "ll-chip-active" : ""}`} onClick={() => setStageFilter(s)}>{s}</button>
           ))}
         </div>
+      </div>
+
+      <div className="ll-daterange">
+        <span className="ll-daterange-label">Next call between</span>
+        <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
+        <span className="ll-daterange-sep">and</span>
+        <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} />
+        {(dateFrom || dateTo) && (
+          <button className="ll-linklike" onClick={() => { setDateFrom(""); setDateTo(""); }}>Clear</button>
+        )}
       </div>
 
       <div className="ll-card ll-ledgercard">
@@ -770,6 +787,11 @@ function Style() {
       .ll-account-logout:hover { color: #fff; }
       .ll-connect-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--paper); border-radius: 8px; padding: 12px 14px; margin-top: 14px; font-size: 13px; }
       .ll-linklike { background: none; border: none; color: var(--ink); text-decoration: underline; cursor: pointer; font-family: inherit; font-size: inherit; padding: 0; }
+      .ll-daterange { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; font-size: 13px; color: var(--ink-soft); }
+      .ll-daterange input[type="date"] { border: 1px solid var(--line); background: var(--card); border-radius: 7px; padding: 7px 10px; font-size: 13px; font-family: inherit; color: var(--ink); outline: none; }
+      .ll-daterange input[type="date"]:focus { border-color: var(--ink-soft); }
+      .ll-daterange-label { white-space: nowrap; }
+      .ll-daterange-sep { white-space: nowrap; }
 
       .ll-main { flex: 1; overflow-y: auto; padding: 32px 40px 60px; }
       .ll-page { max-width: 980px; margin: 0 auto; }
